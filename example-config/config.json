@@ -233,7 +233,7 @@
     "databaseUserName": "<tenantPrefix>_controlplane_user",
     "poolSize": 25
   },
-  "version": 2,
+  "version": 3,
   "zookeepers": [
     "zookeeper-client.zookeeper.svc.cluster.local"
   ]
