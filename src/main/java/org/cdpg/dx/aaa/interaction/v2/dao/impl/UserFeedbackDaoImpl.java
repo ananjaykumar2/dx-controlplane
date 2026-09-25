@@ -4,7 +4,6 @@ import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,9 +13,13 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.cdpg.dx.aaa.interaction.dao.impl.UserInteractionDaoImpl;
 import org.cdpg.dx.aaa.interaction.v2.dao.UserFeedbackDao;
+import org.cdpg.dx.aaa.interaction.v2.model.FeedbackStatus;
 import org.cdpg.dx.aaa.interaction.v2.model.RatingSummary;
 import org.cdpg.dx.aaa.interaction.v2.model.UserFeedback;
 import org.cdpg.dx.aaa.interaction.v2.model.UserFeedbackPaginatedResponse;
+import org.cdpg.dx.common.exception.DxConflictException;
+import org.cdpg.dx.common.exception.DxForbiddenException;
+import org.cdpg.dx.common.exception.DxNotFoundException;
 import org.cdpg.dx.common.request.PaginatedRequest;
 import org.cdpg.dx.common.request.TemporalRequest;
 import org.cdpg.dx.common.util.PaginationInfo;
@@ -34,61 +37,55 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
 
   @Override
   public Future<UserFeedback> postFeedback(UserFeedback userFeedback) {
+
     JsonObject json = userFeedback.toJson();
 
-    boolean hasSubtype =
-        json.containsKey("actionSubtype") && json.getString("actionSubtype") != null;
+    validateFeedback(json);
 
-    boolean hasSubdata =
-        json.containsKey("actionSubdata") && json.getJsonObject("actionSubdata") != null;
-
-    if (hasSubtype && !hasSubdata) {
-      return Future.failedFuture(
-          new IllegalArgumentException("actionSubdata is required when actionSubtype is provided"));
-    }
-
-    if (!hasSubtype && hasSubdata) {
-      return Future.failedFuture(
-          new IllegalArgumentException("actionSubtype is required when actionSubdata is provided"));
-    }
-
-    Integer rating = json.getInteger("entityRating");
-
-    if (rating != null && (rating < 1 || rating > 5)) {
-      return Future.failedFuture(
-          new IllegalArgumentException("entityRating must be between 1 and 5"));
-    }
-
-    if (rating == null && !hasSubtype) {
-      return Future.failedFuture(
-          new IllegalArgumentException(
-              "At least one of entityRating or actionSubtype/actionSubdata must be provided"));
-    }
-
-    // feedback_created_at / feedback_updated_at are kept separate from the shared
-    // created_at / updated_at columns on user_interactions, which also track
-    // unrelated like/dislike/bookmark activity on the same row. They are set here
-    // explicitly (not via the generic upsertNew/EXCLUDED path) so that
-    // feedback_created_at is written once and feedback_updated_at only moves when
-    // the feedback content itself changes.
     String sql =
         """
-      INSERT INTO user_interactions (
-        user_id, asset_id, asset_type, entity_rating, action_subtype, action_subdata,
-        feedback_created_at, feedback_updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, now(), now())
-      ON CONFLICT (user_id, asset_id) DO UPDATE SET
-        asset_type          = COALESCE(EXCLUDED.asset_type, user_interactions.asset_type),
-        entity_rating        = COALESCE(EXCLUDED.entity_rating, user_interactions.entity_rating),
-        action_subtype       = COALESCE(EXCLUDED.action_subtype, user_interactions.action_subtype),
-        action_subdata       = COALESCE(EXCLUDED.action_subdata, user_interactions.action_subdata),
-        feedback_created_at  = COALESCE(user_interactions.feedback_created_at, now()),
-        feedback_updated_at  = now()
-      RETURNING
-        id, user_id, asset_id, asset_type, entity_rating, action_subtype, action_subdata,
-        feedback_created_at, feedback_updated_at
-      """;
+        INSERT INTO user_interactions (
+            user_id,
+            asset_id,
+            asset_type,
+            entity_rating,
+            action_subtype,
+            action_subdata,
+            feedback_created_at,
+            feedback_updated_at,
+            feedback_status,
+            feedback_status_updated_at
+        )
+        VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            now(),
+            now(),
+            'PENDING',
+            now()
+        )
+
+        ON CONFLICT (user_id, asset_id)
+        DO NOTHING
+
+        RETURNING
+            id,
+            user_id,
+            asset_id,
+            asset_type,
+            entity_rating,
+            action_subtype,
+            action_subdata,
+            feedback_created_at,
+            feedback_updated_at,
+            feedback_status,
+            feedback_comment,
+            feedback_status_updated_at
+        """;
 
     JsonArray params =
         new JsonArray()
@@ -99,17 +96,195 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
             .addNull()
             .addNull();
 
-    if (rating != null) {
-      params.set(3, rating);
+    if (json.getInteger("entityRating") != null) {
+      params.set(3, json.getInteger("entityRating"));
     }
-    if (hasSubtype) {
+
+    if (json.getString("actionSubtype") != null) {
       params.set(4, json.getString("actionSubtype"));
       params.set(5, json.getJsonObject("actionSubdata"));
     }
 
     return postgresService
         .executeQuery(sql, params)
-        .map(rows -> UserFeedback.fromJson(rows.getRows().getJsonObject(0)));
+        .compose(
+            rows -> {
+              if (!rows.getRows().isEmpty()) {
+                return Future.succeededFuture(
+                    UserFeedback.fromJson(rows.getRows().getJsonObject(0)));
+              }
+
+              return Future.failedFuture(
+                  new DxConflictException(
+                      "Feedback already exists for this asset. "
+                          + "Use the PUT /iudx/v2/user/feedback API to update it."));
+            })
+        .onFailure(
+            err ->
+                LOGGER.error(
+                    "Failed to post feedback for userId={}, assetId={}",
+                    userFeedback.userId(),
+                    userFeedback.assetId(),
+                    err));
+  }
+
+  private void validateFeedback(JsonObject json) {
+
+    boolean hasSubtype =
+        json.containsKey("actionSubtype") && json.getString("actionSubtype") != null;
+
+    boolean hasSubdata =
+        json.containsKey("actionSubdata") && json.getJsonObject("actionSubdata") != null;
+
+    if (hasSubtype && !hasSubdata) {
+      throw new IllegalArgumentException(
+          "actionSubdata is required when actionSubtype is provided");
+    }
+
+    if (!hasSubtype && hasSubdata) {
+      throw new IllegalArgumentException(
+          "actionSubtype is required when actionSubdata is provided");
+    }
+
+    Integer rating = json.getInteger("entityRating");
+
+    if (rating != null && (rating < 1 || rating > 5)) {
+      throw new IllegalArgumentException("entityRating must be between 1 and 5");
+    }
+
+    if (rating == null && !hasSubtype) {
+      throw new IllegalArgumentException(
+          "At least one of entityRating or actionSubtype/actionSubdata must be provided");
+    }
+  }
+
+  @Override
+  public Future<UserFeedback> putFeedback(UserFeedback userFeedback) {
+
+    JsonObject json = userFeedback.toJson();
+
+    validateFeedback(json);
+
+    String sql =
+        """
+        UPDATE user_interactions
+        SET
+            asset_type = $3,
+            entity_rating = $4,
+            action_subtype = $5,
+            action_subdata = $6,
+            feedback_updated_at = now()
+        WHERE
+            user_id = $1
+            AND asset_id = $2
+            AND feedback_status = 'PENDING'
+
+        RETURNING
+            id,
+            user_id,
+            asset_id,
+            asset_type,
+            entity_rating,
+            action_subtype,
+            action_subdata,
+            feedback_created_at,
+            feedback_updated_at,
+            feedback_status,
+            feedback_comment,
+            feedback_status_updated_at
+        """;
+
+    JsonArray params =
+        new JsonArray()
+            .add(userFeedback.userId().toString())
+            .add(userFeedback.assetId().toString())
+            .add(userFeedback.assetType())
+            .addNull()
+            .addNull()
+            .addNull();
+
+    if (json.getInteger("entityRating") != null) {
+      params.set(3, json.getInteger("entityRating"));
+    }
+
+    if (json.getString("actionSubtype") != null) {
+      params.set(4, json.getString("actionSubtype"));
+      params.set(5, json.getJsonObject("actionSubdata"));
+    }
+
+    return postgresService
+        .executeQuery(sql, params)
+        .compose(
+            rows -> {
+              if (!rows.getRows().isEmpty()) {
+                return Future.succeededFuture(
+                    UserFeedback.fromJson(rows.getRows().getJsonObject(0)));
+              }
+
+              return getExistingFeedbackStatus(userFeedback.userId(), userFeedback.assetId())
+                  .compose(
+                      status -> {
+                        if (status == null) {
+                          return Future.failedFuture(
+                              new DxForbiddenException(
+                                  "Feedback not found for the specified asset"));
+                        }
+
+                        if ("APPROVED".equals(status)) {
+                          return Future.failedFuture(
+                              new DxForbiddenException(
+                                  "Feedback cannot be updated because it has already been approved"));
+                        }
+
+                        if ("REJECTED".equals(status)) {
+                          return Future.failedFuture(
+                              new DxForbiddenException(
+                                  "Feedback cannot be updated because it has already been rejected"));
+                        }
+
+                        return Future.failedFuture(
+                            new DxForbiddenException(
+                                "Feedback can only be updated while it is in PENDING status"));
+                      });
+            })
+        .onFailure(
+            err ->
+                LOGGER.error(
+                    "Failed to update feedback for userId={}, assetId={}",
+                    userFeedback.userId(),
+                    userFeedback.assetId(),
+                    err));
+  }
+
+  private Future<String> getExistingFeedbackStatus(UUID userId, UUID assetId) {
+
+    String sql =
+        """
+        SELECT feedback_status
+        FROM user_interactions
+        WHERE user_id = $1
+          AND asset_id = $2
+        """;
+
+    JsonArray params = new JsonArray().add(userId.toString()).add(assetId.toString());
+
+    return postgresService
+        .executeQuery(sql, params)
+        .map(
+            rows -> {
+              if (rows.getRows().isEmpty()) {
+                return null;
+              }
+
+              return rows.getRows().getJsonObject(0).getString("feedback_status");
+            })
+        .onFailure(
+            err ->
+                LOGGER.error(
+                    "Failed to getExistingFeedbackStatus for userId={}, assetId={}",
+                    userId,
+                    assetId,
+                    err));
   }
 
   // Shared WHERE-clause builder for the paginated feedback list and the (page-invariant)
@@ -137,8 +312,16 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
 
           for (int i = 0; i < values.size(); i++) {
             if (i > 0) where.append(", ");
+
             where.append("$").append(index.getAndIncrement());
-            params.add(values.get(i));
+
+            Object value = values.get(i);
+
+            if ("entity_rating".equals(column)) {
+              params.add(Integer.valueOf(value.toString()));
+            } else {
+              params.add(value);
+            }
           }
 
           where.append(")");
@@ -150,6 +333,7 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
     applyFilter.accept("action_subtype", filters.get("action_subtype"));
     applyFilter.accept("entity_rating", filters.get("entity_rating"));
 
+    // Temporal filters
     // feedback_created_at is a dedicated column (distinct from the shared created_at used by
     // like/dislike/bookmark activity on the same row); only that field is exposed for temporal
     // filtering here, so any other timeField configured upstream is intentionally ignored.
@@ -158,6 +342,7 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
         if (!"feedback_created_at".equals(tr.timeField())) continue;
 
         String rel = tr.timeRel() != null ? tr.timeRel().toLowerCase() : "";
+
         switch (rel) {
           case "before" -> {
             where.append(" AND feedback_created_at < $").append(index.getAndIncrement());
@@ -173,6 +358,7 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
                 .append(index.getAndIncrement())
                 .append(" AND $")
                 .append(index.getAndIncrement());
+
             params.add(tr.time());
             params.add(tr.endtime());
           }
@@ -201,7 +387,8 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
   }
 
   @Override
-  public Future<UserFeedbackPaginatedResponse> fetchUserFeedbacks(PaginatedRequest request) {
+  public Future<UserFeedbackPaginatedResponse> fetchPlatformUsersFeedbacks(
+      PaginatedRequest request) {
 
     int page = request.page();
     int size = request.size();
@@ -251,6 +438,9 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
           action_subdata,
           feedback_created_at,
           feedback_updated_at,
+          feedback_status,
+          feedback_comment,
+          feedback_status_updated_at,
           COUNT(*) OVER() AS total_count
       FROM user_interactions
       """
@@ -320,6 +510,143 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
             });
   }
 
+  @Override
+  public Future<UserFeedbackPaginatedResponse> fetchUserFeedbacks(PaginatedRequest request) {
+
+    int page = request.page();
+    int size = request.size();
+    int offset = (page - 1) * size;
+
+    Map<String, Object> filters = request.filters();
+    LOGGER.debug("filters: {}", filters);
+
+    List<TemporalRequest> temporalRequests = request.temporalRequests();
+
+    // Only feedback_created_at is exposed for sorting today; whitelist defensively
+    // rather than splicing an arbitrary column name into the SQL string.
+    OrderBy orderBy =
+        request.orderByList() != null && !request.orderByList().isEmpty()
+            ? request.orderByList().getFirst()
+            : null;
+
+    String orderDirection =
+        orderBy != null
+                && "feedback_created_at".equals(orderBy.getColumn())
+                && orderBy.getDirection() == OrderBy.Direction.ASC
+            ? "ASC"
+            : "DESC";
+
+    // -----------------------------
+    // Paginated feedback rows
+    // -----------------------------
+    // user_interactions is shared with like/dislike/bookmark tracking; only rows
+    // that actually carry feedback (a rating and/or a structured action) belong
+    // in this response, not every interaction row for the matched user/asset.
+    FilterClause pageFilter =
+        buildFilterClause(
+            """
+            (
+                entity_rating IS NOT NULL
+                OR action_subtype IS NOT NULL
+            )
+            """,
+            filters,
+            temporalRequests);
+
+    int limitIndex = pageFilter.nextIndex();
+    int offsetIndex = limitIndex + 1;
+
+    String sql =
+        """
+      SELECT
+          id,
+          user_id,
+          asset_id,
+          asset_type,
+          entity_rating,
+          action_subtype,
+          action_subdata,
+          feedback_created_at,
+          feedback_updated_at,
+          feedback_status,
+          feedback_comment,
+          feedback_status_updated_at,
+          COUNT(*) OVER() AS total_count
+      FROM user_interactions
+      """
+            + pageFilter.sql()
+            + " ORDER BY feedback_created_at "
+            + orderDirection
+            + " NULLS LAST"
+            + " LIMIT $"
+            + limitIndex
+            + " OFFSET $"
+            + offsetIndex;
+
+    JsonArray params = pageFilter.params().copy();
+    params.add(size);
+    params.add(offset);
+
+    LOGGER.debug("SQL: {}", sql);
+    LOGGER.debug("Params: {}", params);
+
+    Future<PagedRows> pageFuture =
+        postgresService
+            .executeQuery(sql, params)
+            .map(
+                rows ->
+                    new PagedRows(
+                        rows.getRows().stream()
+                            .map(obj -> UserFeedback.fromJson((JsonObject) obj))
+                            .toList(),
+                        rows.getTotalCount()));
+
+    // -----------------------------
+    // Full-set rating summary (never page-scoped, so no LIMIT/OFFSET here)
+    // -----------------------------
+    FilterClause summaryFilter =
+        buildFilterClause(
+            """
+            entity_rating IS NOT NULL
+            AND feedback_status = 'APPROVED'
+            """,
+            filters,
+            temporalRequests);
+
+    String summarySql =
+        """
+      SELECT
+          COUNT(*) AS total_ratings,
+          COALESCE(AVG(entity_rating), 0)::double precision AS average_rating,
+          COUNT(*) FILTER (WHERE entity_rating = 1) AS rating_1,
+          COUNT(*) FILTER (WHERE entity_rating = 2) AS rating_2,
+          COUNT(*) FILTER (WHERE entity_rating = 3) AS rating_3,
+          COUNT(*) FILTER (WHERE entity_rating = 4) AS rating_4,
+          COUNT(*) FILTER (WHERE entity_rating = 5) AS rating_5
+      FROM user_interactions
+      """
+            + summaryFilter.sql();
+
+    LOGGER.debug("Summary SQL: {}", summarySql);
+    LOGGER.debug("Summary Params: {}", summaryFilter.params());
+
+    Future<RatingSummary> summaryFuture =
+        postgresService
+            .executeQuery(summarySql, summaryFilter.params())
+            .map(rows -> toRatingSummary(rows.getRows().getJsonObject(0)));
+
+    List<Future> futures = List.of(pageFuture, summaryFuture);
+    return CompositeFuture.all(futures)
+        .map(
+            cf -> {
+              PagedRows paged = pageFuture.result();
+              return new UserFeedbackPaginatedResponse(
+                  paged.data(),
+                  summaryFuture.result(),
+                  PaginationInfo.from(page, size, paged.total()));
+            });
+  }
+
   private record PagedRows(List<UserFeedback> data, long total) {}
 
   @Override
@@ -332,9 +659,16 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
           action_subdata      = NULL,
           entity_rating       = NULL,
           feedback_created_at = NULL,
-          feedback_updated_at = NULL
+          feedback_updated_at = NULL,
+          feedback_status = NULL,
+          feedback_comment = NULL,
+          feedback_status_updated_at = NULL
       WHERE user_id = $1
       AND asset_id = $2
+      AND (
+              entity_rating IS NOT NULL
+              OR action_subtype IS NOT NULL
+          )
       """;
 
     JsonArray params = new JsonArray().add(userId.toString()).add(assetId.toString());
@@ -343,5 +677,191 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
     LOGGER.debug("Params: {}", params);
 
     return postgresService.executeQuery(sql, params).map(QueryResult::isRowsAffected);
+  }
+
+  @Override
+  public Future<UserFeedback> updateFeedbackStatus(
+      UUID feedbackId, FeedbackStatus status, String comment) {
+
+    String sql =
+        """
+        UPDATE user_interactions
+        SET
+            feedback_status = $2,
+            feedback_comment = $3,
+            feedback_status_updated_at = now()
+        WHERE
+            id = $1
+            AND (
+                entity_rating IS NOT NULL
+                OR action_subtype IS NOT NULL
+            )
+            AND feedback_status = 'PENDING'
+        RETURNING
+            id,
+            user_id,
+            asset_id,
+            asset_type,
+            entity_rating,
+            action_subtype,
+            action_subdata,
+            feedback_created_at,
+            feedback_updated_at,
+            feedback_status,
+            feedback_comment,
+            feedback_status_updated_at
+        """;
+
+    JsonArray params = new JsonArray().add(feedbackId.toString()).add(status.name()).add(comment);
+
+    LOGGER.debug("SQL: {}", sql);
+    LOGGER.debug("Params: {}", params);
+
+    return postgresService
+        .executeQuery(sql, params)
+        .compose(
+            rows -> {
+              if (rows.getRows().isEmpty()) {
+
+                return Future.failedFuture(new DxNotFoundException("Pending feedback not found"));
+              }
+
+              return Future.succeededFuture(UserFeedback.fromJson(rows.getRows().getJsonObject(0)));
+            });
+  }
+
+  @Override
+  public Future<UserFeedbackPaginatedResponse> fetchApprovedPlatformUserFeedbacks(
+      PaginatedRequest request) {
+
+    int page = request.page();
+    int size = request.size();
+    int offset = (page - 1) * size;
+
+    Map<String, Object> filters = request.filters();
+    LOGGER.debug("Approved feedback filters: {}", filters);
+
+    List<TemporalRequest> temporalRequests = request.temporalRequests();
+
+    OrderBy orderBy =
+        request.orderByList() != null && !request.orderByList().isEmpty()
+            ? request.orderByList().getFirst()
+            : null;
+
+    String orderDirection =
+        orderBy != null
+                && "feedback_created_at".equals(orderBy.getColumn())
+                && orderBy.getDirection() == OrderBy.Direction.ASC
+            ? "ASC"
+            : "DESC";
+
+    // ---------------------------------------------------------
+    // Paginated feedback rows
+    // ---------------------------------------------------------
+    //
+    // Only return actual feedback rows and only rows that have
+    // been approved for consumer visibility.
+    //
+    FilterClause pageFilter =
+        buildFilterClause(
+            """
+            (entity_rating IS NOT NULL OR action_subtype IS NOT NULL)
+            AND feedback_status = 'APPROVED'
+            """,
+            filters,
+            temporalRequests);
+
+    int limitIndex = pageFilter.nextIndex();
+    int offsetIndex = limitIndex + 1;
+
+    String sql =
+        """
+        SELECT
+            id,
+            user_id,
+            asset_id,
+            asset_type,
+            entity_rating,
+            action_subtype,
+            action_subdata,
+            feedback_created_at,
+            feedback_updated_at,
+            feedback_status,
+            feedback_comment,
+            feedback_status_updated_at,
+            COUNT(*) OVER() AS total_count
+        FROM user_interactions
+        """
+            + pageFilter.sql()
+            + " ORDER BY feedback_created_at "
+            + orderDirection
+            + " NULLS LAST"
+            + " LIMIT $"
+            + limitIndex
+            + " OFFSET $"
+            + offsetIndex;
+
+    JsonArray params = pageFilter.params().copy();
+    params.add(size);
+    params.add(offset);
+
+    LOGGER.debug("Approved feedback SQL: {}", sql);
+    LOGGER.debug("Approved feedback params: {}", params);
+
+    Future<PagedRows> pageFuture =
+        postgresService
+            .executeQuery(sql, params)
+            .map(
+                rows ->
+                    new PagedRows(
+                        rows.getRows().stream()
+                            .map(obj -> UserFeedback.fromJson((JsonObject) obj))
+                            .toList(),
+                        rows.getTotalCount()));
+
+    // ---------------------------------------------------------
+    // Full-set rating summary
+    // ---------------------------------------------------------
+    FilterClause summaryFilter =
+        buildFilterClause(
+            """
+            entity_rating IS NOT NULL
+            AND feedback_status = 'APPROVED'
+            """,
+            filters,
+            temporalRequests);
+
+    String summarySql =
+        """
+        SELECT
+            COUNT(*) AS total_ratings,
+            COALESCE(AVG(entity_rating), 0)::double precision AS average_rating,
+            COUNT(*) FILTER (WHERE entity_rating = 1) AS rating_1,
+            COUNT(*) FILTER (WHERE entity_rating = 2) AS rating_2,
+            COUNT(*) FILTER (WHERE entity_rating = 3) AS rating_3,
+            COUNT(*) FILTER (WHERE entity_rating = 4) AS rating_4,
+            COUNT(*) FILTER (WHERE entity_rating = 5) AS rating_5
+        FROM user_interactions
+        """
+            + summaryFilter.sql();
+
+    LOGGER.debug("Approved feedback summary SQL: {}", summarySql);
+    LOGGER.debug("Approved feedback summary params: {}", summaryFilter.params());
+
+    Future<RatingSummary> summaryFuture =
+        postgresService
+            .executeQuery(summarySql, summaryFilter.params())
+            .map(rows -> toRatingSummary(rows.getRows().getJsonObject(0)));
+
+    return Future.all(List.of(pageFuture, summaryFuture))
+        .map(
+            cf -> {
+              PagedRows paged = pageFuture.result();
+
+              return new UserFeedbackPaginatedResponse(
+                  paged.data(),
+                  summaryFuture.result(),
+                  PaginationInfo.from(page, size, paged.total()));
+            });
   }
 }

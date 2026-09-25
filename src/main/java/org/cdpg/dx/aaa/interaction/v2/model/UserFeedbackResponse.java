@@ -12,13 +12,18 @@ public record UserFeedbackResponse(
     String organisation,
     UUID assetId,
     String assetType,
+    String assetName,
     Integer entityRating,
     @JsonProperty("actionSubtype") String actionSubtype,
     @JsonProperty("actionSubdata") JsonObject actionSubdata,
     LocalDateTime ratingCreatedAt,
-    LocalDateTime ratingUpdatedAt) {
+    LocalDateTime ratingUpdatedAt,
+    @JsonProperty("feedbackStatus") String feedbackStatus,
+    @JsonProperty("feedbackComment") String feedbackComment,
+    @JsonProperty("feedbackStatusUpdatedAt") LocalDateTime feedbackStatusUpdatedAt) {
 
-  public static UserFeedbackResponse from(UserFeedback feedback, String userName, String organisation) {
+  public static UserFeedbackResponse from(
+      UserFeedback feedback, String userName, String organisation, String assetName) {
     return new UserFeedbackResponse(
         feedback.id(),
         feedback.userId(),
@@ -26,10 +31,14 @@ public record UserFeedbackResponse(
         organisation,
         feedback.assetId(),
         feedback.assetType(),
+        assetName,
         feedback.entityRating(),
         feedback.actionSubType(),
         feedback.actionSubData(),
         feedback.ratingCreatedAt(),
-        feedback.ratingUpdatedAt());
+        feedback.ratingUpdatedAt(),
+        feedback.feedbackStatus(),
+        feedback.feedbackComment(),
+        feedback.feedbackStatusUpdatedAt());
   }
 }

@@ -271,17 +271,16 @@
       already interacted with the asset (e.g., via download or API access).
       Requires an authenticated user token.
 
-
       At least one of `entityRating` or the `actionSubtype`/`actionSubdata` pair
-      must be provided; a request with neither results in a 400 Bad Request.
-
+      must be provided.
 
       `actionSubtype` and `actionSubdata` are a paired field: if either one is
-      provided, the other is also required. Providing only one of the two
-      results in a 400 Bad Request. `entityRating` may be supplied independently
-      of the `actionSubtype`/`actionSubdata` pair. Calling this endpoint again
-      for the same `assetId` updates the existing feedback entry instead of
-      creating a duplicate.
+      provided, the other is also required.
+
+      This endpoint is used only to create feedback for the first time. If
+      feedback already exists for the specified asset, the request is rejected
+      and the consumer must use the PUT endpoint to update the feedback while
+      it is still in `PENDING` status.
     operationId: post-user-feedback
     security:
       - authorization: [ ]
@@ -372,7 +371,7 @@
             example:
               type: "urn:dx:controlPlane:success"
               title: "Success"
-              detail: "Interaction updated successfully"
+              detail: "Feedback submitted successfully"
       '400':
         description: Bad Request
         content:
@@ -498,135 +497,272 @@
         }''
 
         '
-  get:
+  put:
     tags:
-    - User Interactions
-    summary: Get user feedback
-    description: 'Retrieve paginated user feedback with optional filters by user, asset, or action subtype. Requires an authenticated user token.
+      - User Interactions
+    summary: Update user feedback on entity
+    description: >
+      Update previously submitted user feedback for a specific data asset.
+      The feedback must have been submitted by the authenticated user and
+      must currently be in `PENDING` status.
 
-      '
-    operationId: get-user-feedback
+      At least one of `entityRating` or the `actionSubtype`/`actionSubdata`
+      pair must be provided.
+
+      `actionSubtype` and `actionSubdata` are a paired field: if either one
+      is provided, the other is also required. `entityRating` may be supplied
+      independently of the `actionSubtype`/`actionSubdata` pair.
+
+      Feedback can only be updated while it is in `PENDING` status, before
+      it has been reviewed by the COS Admin. Once feedback is `APPROVED` or
+      `REJECTED`, it cannot be modified.
+
+      If no feedback exists for the specified asset and authenticated user,
+      the request is rejected. To submit feedback for the first time, use
+      the POST /iudx/v2/user/feedback endpoint.
+
+    operationId: put-user-feedback
     security:
-    - authorization: []
-    parameters:
-    - name: userId
-      in: query
-      description: Filter by user UUID
-      required: false
-      schema:
-        type: string
-        format: uuid
-    - name: assetId
-      in: query
-      description: Filter by asset UUID
-      required: false
-      schema:
-        type: string
-        format: uuid
-    - name: actionSubtype
-      in: query
-      description: Filter by action subtype (repeatable)
-      required: false
-      style: form
-      explode: true
-      schema:
-        type: array
-        items:
-          type: string
-    - name: rating
-      in: query
-      description: Filter by star rating (repeatable)
-      required: false
-      style: form
-      explode: true
-      schema:
-        type: array
-        items:
-          type: integer
-          minimum: 1
-          maximum: 5
-    - name: time
-      in: query
-      description: Start of the rating-creation time window. Requires `timerel`; requires `endtime` for `between`/`during`.
-      required: false
-      schema:
-        type: string
-        format: date-time
-    - name: endtime
-      in: query
-      description: End of the rating-creation time window. Only used with `timerel=between` or `timerel=during`.
-      required: false
-      schema:
-        type: string
-        format: date-time
-    - name: timerel
-      in: query
-      description: Temporal relation to apply against `ratingCreatedAt` when `time` is provided.
-      required: false
-      schema:
-        type: string
-        enum:
-          - before
-          - after
-          - between
-          - during
-    - $ref: ../components/parameters.yaml#/PageParam
-    - $ref: ../components/parameters.yaml#/SizeParam
-    - name: sort
-      in: query
-      description: 'Sort results by rating creation time. Format: `ratingCreatedAt:asc` or `ratingCreatedAt:desc`. Defaults to `ratingCreatedAt:desc`.'
-      required: false
-      schema:
-        type: string
-      example: ratingCreatedAt:desc
+      - authorization: [ ]
+
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - assetId
+              - assetType
+            properties:
+              assetId:
+                type: string
+                format: uuid
+                description: UUID of the asset for which the feedback is being updated
+
+              assetType:
+                type: string
+                description: Type of the asset for which the feedback is being updated
+                enum:
+                  - DATABANK
+                  - AI_MODEL
+                  - USECASE
+
+              entityRating:
+                type: integer
+                minimum: 1
+                maximum: 5
+                description: >
+                  Updated star rating from 1 (lowest) to 5 (highest).
+                  Optional when structured feedback is provided.
+
+              actionSubtype:
+                type: string
+                description: >
+                  Updated structured feedback category (e.g., data quality,
+                  documentation). Required if actionSubdata is provided.
+
+              actionSubdata:
+                type: object
+                description: >
+                  Updated additional structured data associated with the
+                  feedback. Required if actionSubtype is provided.
+
+          examples:
+            ratingOnly:
+              summary: Update star rating only
+              value:
+                assetId: "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8"
+                assetType: "DATABANK"
+                entityRating: 4
+
+            structuredOnly:
+              summary: Update structured feedback only
+              value:
+                assetId: "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8"
+                assetType: "AI_MODEL"
+                actionSubtype: "documentation"
+                actionSubdata:
+                  comment: "Documentation should include more usage examples."
+
+            full:
+              summary: Update star rating and structured feedback
+              value:
+                assetId: "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8"
+                assetType: "DATABANK"
+                entityRating: 4
+                actionSubtype: "data_quality"
+                actionSubdata:
+                  comment: "The data is accurate but some records need correction."
+
+            useCase:
+              summary: Update feedback on a use case asset
+              value:
+                assetId: "811e9876-9381-4a25-8ad1-e8b289616ab8"
+                assetType: "USECASE"
+                entityRating: 3
+                actionSubtype: "relevance"
+                actionSubdata:
+                  comment: "Useful use case, but more edge cases should be covered."
+
     responses:
       '200':
-        description: Successfully retrieved user feedback
+        description: Feedback successfully updated
         content:
           application/json:
             schema:
-              $ref: ../components/schemas/interaction.yaml#/UserFeedbackPaginatedResponse
+              type: object
+              properties:
+                type:
+                  type: string
+                title:
+                  type: string
+                detail:
+                  type: string
+            example:
+              type: "urn:dx:controlPlane:success"
+              title: "Success"
+              detail: "Feedback updated successfully"
+
       '400':
         description: Bad Request
         content:
           application/json:
             schema:
               $ref: ../components/schemas/common.yaml#/GenericBadRequestResponse
+            examples:
+              missingRequiredField:
+                summary: Missing required field
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: Missing or malformed request
+
+              missingFeedbackContent:
+                summary: Neither entityRating nor actionSubtype/actionSubdata provided
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: >
+                    At least one of entityRating or
+                    actionSubtype/actionSubdata must be provided
+
+              orphanSubtype:
+                summary: actionSubtype provided without actionSubdata
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: >
+                    actionSubdata is required when actionSubtype is provided
+
+              orphanSubdata:
+                summary: actionSubdata provided without actionSubtype
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: >
+                    actionSubtype is required when actionSubdata is provided
+
+              invalidRating:
+                summary: entityRating out of range
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: entityRating must be between 1 and 5
+
+              feedbackNotFound:
+                summary: Feedback does not exist
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: >
+                    Feedback not found for the specified asset
+
+              feedbackNotPending:
+                summary: Feedback is no longer pending
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: >
+                    Feedback can only be updated while it is in PENDING status
+
+      '401':
+        description: Unauthorized
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/UnauthorizedResponse
+            example:
+              type: urn:dx:controlPlane:notAuthorized
+              title: Not Authorized
+              detail: Missing or invalid Bearer token
+
       '500':
         description: Internal Server Error
         content:
           application/json:
             schema:
               $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
+
     x-codeSamples:
-    - lang: cURL
-      label: Get user feedback (by asset)
-      source: 'curl --location ''https://${HOSTNAME}/iudx/v2/user/feedback?assetId=811e9876-9381-4a25-8ad1-e8b289616ab8&page=1&size=10'' \
+      - lang: cURL
+        label: Update user feedback (rating + structured)
+        source: |
+          curl --location --request PUT '${HOSTNAME}/iudx/v2/user/feedback' \
+            --header 'Authorization: Bearer <your-token>' \
+            --header 'Content-Type: application/json' \
+            --data '{
+              "assetId": "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8",
+              "assetType": "DATABANK",
+              "entityRating": 4,
+              "actionSubtype": "data_quality",
+              "actionSubdata": {
+                "comment": "The data is accurate but some records need correction."
+              }
+            }'
 
-        --header ''Authorization: Bearer <your-token>''
+      - lang: cURL
+        label: Update user feedback (rating only)
+        source: |
+          curl --location --request PUT '${HOSTNAME}/iudx/v2/user/feedback' \
+            --header 'Authorization: Bearer <your-token>' \
+            --header 'Content-Type: application/json' \
+            --data '{
+              "assetId": "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8",
+              "assetType": "DATABANK",
+              "entityRating": 4
+            }'
 
-        '
-    - lang: cURL
-      label: Get user feedback (by user)
-      source: 'curl --location ''https://${HOSTNAME}/iudx/v2/user/feedback?userId=fd62ba22-d338-4dad-b09c-2bccfa20b04a&page=1&size=10'' \
+      - lang: cURL
+        label: Update user feedback (structured only)
+        source: |
+          curl --location --request PUT '${HOSTNAME}/iudx/v2/user/feedback' \
+            --header 'Authorization: Bearer <your-token>' \
+            --header 'Content-Type: application/json' \
+            --data '{
+              "assetId": "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8",
+              "assetType": "AI_MODEL",
+              "actionSubtype": "documentation",
+              "actionSubdata": {
+                "comment": "Documentation should include more usage examples."
+              }
+            }'
 
-        --header ''Authorization: Bearer <your-token>''
-
-        '
-    - lang: cURL
-      label: Get user feedback (by action subtype, repeatable)
-      source: 'curl --location ''https://${HOSTNAME}/iudx/v2/user/feedback?actionSubtype=data_quality&actionSubtype=documentation&page=1&size=10'' \
-
-        --header ''Authorization: Bearer <your-token>''
-
-        '
-    - lang: cURL
-      label: Get user feedback (unfiltered, paginated)
-      source: 'curl --location ''https://${HOSTNAME}/iudx/v2/user/feedback?page=1&size=10'' \
-
-        --header ''Authorization: Bearer <your-token>''
-
-        '
+      - lang: cURL
+        label: Update feedback on a use case asset
+        source: |
+          curl --location --request PUT '${HOSTNAME}/iudx/v2/user/feedback' \
+            --header 'Authorization: Bearer <your-token>' \
+            --header 'Content-Type: application/json' \
+            --data '{
+              "assetId": "811e9876-9381-4a25-8ad1-e8b289616ab8",
+              "assetType": "USECASE",
+              "entityRating": 3,
+              "actionSubtype": "relevance",
+              "actionSubdata": {
+                "comment": "Useful use case, but more edge cases should be covered."
+              }
+            }'
   delete:
     tags:
     - User Interactions
@@ -664,7 +800,7 @@
             example:
               type: "urn:dx:controlPlane:success"
               title: "Success"
-              detail: "Interaction deleted successfully"
+              detail: "Feedback deleted successfully"
       '400':
         description: Bad Request
         content:
@@ -711,6 +847,586 @@
         --header ''Authorization: Bearer <your-token>''
 
         '
+/iudx/v2/user/feedback/platform:
+  get:
+    tags:
+      - User Interactions
+    summary: Get user feedback for platform review
+    description: >
+      Retrieve a paginated list of user feedback submitted for platform assets
+      that is currently pending COS Admin review. This endpoint is restricted to
+      users with the `cos_admin` role. COS Admins can use the returned feedback
+      to review each submission and subsequently approve or reject it through
+      the feedback approval API. Optional filters can be used to narrow the
+      pending feedback by user, asset, action subtype, rating, or feedback
+      creation time.
+    operationId: get-platform-user-feedback
+    security:
+      - authorization: []
+    parameters:
+      - name: userId
+        in: query
+        description: Filter by user UUID
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: assetId
+        in: query
+        description: Filter by asset UUID
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: actionSubtype
+        in: query
+        description: Filter by action subtype (repeatable)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+      - name: rating
+        in: query
+        description: Filter by star rating (repeatable)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 5
+      - name: time
+        in: query
+        description: Start of the rating-creation time window. Requires `timerel`; requires `endtime` for `between`/`during`.
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: endtime
+        in: query
+        description: End of the rating-creation time window. Only used with `timerel=between` or `timerel=during`.
+        required: false
+        schema:
+          type: string
+          format: date-time
+      - name: timerel
+        in: query
+        description: Temporal relation to apply against `ratingCreatedAt` when `time` is provided.
+        required: false
+        schema:
+          type: string
+          enum:
+            - before
+            - after
+            - between
+            - during
+      - $ref: ../components/parameters.yaml#/PageParam
+      - $ref: ../components/parameters.yaml#/SizeParam
+      - name: sort
+        in: query
+        description: 'Sort results by rating creation time. Format: `ratingCreatedAt:asc` or `ratingCreatedAt:desc`. Defaults to `ratingCreatedAt:desc`.'
+        required: false
+        schema:
+          type: string
+        example: ratingCreatedAt:desc
+    responses:
+      '200':
+        description: Successfully retrieved user feedback
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/interaction.yaml#/UserFeedbackPaginatedResponse
+      '400':
+        description: Bad Request
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/GenericBadRequestResponse
+      '500':
+        description: Internal Server Error
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
+    x-codeSamples:
+      - lang: cURL
+        label: Get user feedback (by asset)
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/platform?assetId=811e9876-9381-4a25-8ad1-e8b289616ab8&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get user feedback (by user)
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/platform?userId=fd62ba22-d338-4dad-b09c-2bccfa20b04a&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get user feedback (by action subtype, repeatable)
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/platform?actionSubtype=data_quality&actionSubtype=documentation&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get user feedback (unfiltered, paginated)
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/platform?page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+/iudx/v2/user/feedback/{id}:
+  put:
+    tags:
+      - User Interactions
+    summary: Approve or reject user feedback
+    description: >
+      Approve or reject a pending user feedback entry. This API is restricted to
+      COS Admin users.
+
+
+      Only feedback entries with `PENDING` status can be processed. Once feedback
+      is approved or rejected, its status cannot be changed through this API.
+
+
+      When approving feedback, the `comment` field is optional. When rejecting
+      feedback, a non-empty `comment` is mandatory and should describe the reason
+      for rejection.
+
+
+      A rejected feedback entry remains associated with the submitting user but
+      is not considered for public/provider feedback listings or rating summaries.
+    operationId: put-platform-user-feedback
+    security:
+      - authorization: []
+    parameters:
+      - name: id
+        in: path
+        description: UUID of the feedback entry to approve or reject
+        required: true
+        schema:
+          type: string
+          format: uuid
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - status
+            properties:
+              status:
+                type: string
+                description: Status to apply to the pending feedback
+                enum:
+                  - APPROVED
+                  - REJECTED
+              comment:
+                type: string
+                description: >
+                  Reason for the moderation decision. Required when status is
+                  `REJECTED` and optional when status is `APPROVED`.
+          examples:
+            approve:
+              summary: Approve feedback
+              value:
+                status: "APPROVED"
+            approveWithComment:
+              summary: Approve feedback with comment
+              value:
+                status: "APPROVED"
+                comment: "Feedback reviewed and approved."
+            reject:
+              summary: Reject feedback with reason
+              value:
+                status: "REJECTED"
+                comment: "The feedback does not provide sufficient information."
+    responses:
+      '200':
+        description: Feedback status updated successfully
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                title:
+                  type: string
+                detail:
+                  type: string
+            example:
+              type: "urn:dx:controlPlane:success"
+              title: "Success"
+              detail: "Feedback status updated successfully"
+      '400':
+        description: Bad Request
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/GenericBadRequestResponse
+            examples:
+              invalidStatus:
+                summary: Invalid feedback status
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: "status must be APPROVED or REJECTED"
+              missingComment:
+                summary: Missing rejection comment
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: "Comment is required when rejecting feedback"
+              invalidFeedbackId:
+                summary: Invalid feedback UUID
+                value:
+                  type: urn:dx:controlPlane:badRequest
+                  title: Bad Request
+                  detail: "Invalid feedback id"
+      '401':
+        description: Unauthorized
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/UnauthorizedResponse
+            example:
+              type: urn:dx:controlPlane:notAuthorized
+              title: Not Authorized
+              detail: Missing or invalid Bearer token
+      '403':
+        description: Forbidden
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/ForbiddenResponse
+            example:
+              type: urn:dx:controlPlane:forbidden
+              title: Forbidden
+              detail: Only COS Admin users can approve or reject feedback
+      '404':
+        description: Pending feedback not found
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                title:
+                  type: string
+                detail:
+                  type: string
+            example:
+              type: "urn:dx:controlPlane:notFound"
+              title: "Not Found"
+              detail: "Pending feedback not found"
+      '500':
+        description: Internal Server Error
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
+    x-codeSamples:
+      - lang: cURL
+        label: Approve user feedback
+        source: 'curl --location --request PUT ''https://${HOSTNAME}/iudx/v2/user/feedback/9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8'' \
+
+          --header ''Authorization: Bearer <your-token>'' \
+
+          --header ''Content-Type: application/json'' \
+
+          --data ''{
+
+          "status": "APPROVED"
+
+          }'''
+      - lang: cURL
+        label: Reject user feedback
+        source: 'curl --location --request PUT ''https://${HOSTNAME}/iudx/v2/user/feedback/9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8'' \
+
+          --header ''Authorization: Bearer <your-token>'' \
+
+          --header ''Content-Type: application/json'' \
+
+          --data ''{
+
+          "status": "REJECTED",
+
+          "comment": "The feedback does not provide sufficient information."
+
+          }'''
+/iudx/v2/user/feedback/approved:
+  get:
+    tags:
+      - User Interactions
+    summary: Get approved user feedback
+    description: >
+      Retrieve a paginated list of user feedback that has been approved for
+      consumer visibility. This endpoint is accessible to users with the
+      `consumer` role. Only feedback with an `APPROVED` status is returned.
+      Consumers can optionally filter the approved feedback by asset UUID
+      and/or user UUID.
+    operationId: get-approved-user-feedback
+    security:
+      - authorization: []
+    parameters:
+      - name: assetId
+        in: query
+        description: Filter feedback by asset UUID
+        required: false
+        schema:
+          type: string
+          format: uuid
+
+      - name: actionSubtype
+        in: query
+        description: Filter by action subtype (repeatable)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+
+      - name: rating
+        in: query
+        description: Filter by star rating (repeatable)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 5
+
+      - name: time
+        in: query
+        description: >
+          Start of the feedback-creation time window. Requires `timerel`;
+          requires `endtime` for `between`/`during`.
+        required: false
+        schema:
+          type: string
+          format: date-time
+
+      - name: endtime
+        in: query
+        description: >
+          End of the feedback-creation time window. Only used with
+          `timerel=between` or `timerel=during`.
+        required: false
+        schema:
+          type: string
+          format: date-time
+
+      - name: timerel
+        in: query
+        description: >
+          Temporal relation to apply against the feedback creation time
+          when `time` is provided.
+        required: false
+        schema:
+          type: string
+          enum:
+            - before
+            - after
+            - between
+            - during
+
+      - $ref: ../components/parameters.yaml#/PageParam
+
+      - $ref: ../components/parameters.yaml#/SizeParam
+
+      - name: sort
+        in: query
+        description: >
+          Sort results by feedback creation time. Format:
+          `ratingCreatedAt:asc` or `ratingCreatedAt:desc`.
+          Defaults to `ratingCreatedAt:desc`.
+        required: false
+        schema:
+          type: string
+        example: ratingCreatedAt:desc
+
+    responses:
+      '200':
+        description: Successfully retrieved approved user feedback
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/interaction.yaml#/UserFeedbackPaginatedResponse
+
+      '400':
+        description: Bad Request
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/GenericBadRequestResponse
+
+      '500':
+        description: Internal Server Error
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
+
+    x-codeSamples:
+      - lang: cURL
+        label: Get approved feedback
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/approved?page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get approved feedback by asset
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/approved?assetId=811e9876-9381-4a25-8ad1-e8b289616ab8&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get approved feedback by user
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/approved?userId=fd62ba22-d338-4dad-b09c-2bccfa20b04a&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get approved feedback by asset and user
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/approved?assetId=811e9876-9381-4a25-8ad1-e8b289616ab8&userId=fd62ba22-d338-4dad-b09c-2bccfa20b04a&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+/iudx/v2/user/feedback/user:
+  get:
+    tags:
+      - User Interactions
+    summary: Get my user feedback
+    description: >
+      Retrieve a paginated list of feedback submitted by the authenticated consumer. The response contains only feedback created by the requesting user, including feedback in pending, approved, and rejected states. Consumers can optionally filter their feedback by asset, action subtype, rating, or feedback creation time. The user identity is derived from the authenticated user token and cannot be supplied as a query parameter.
+    operationId: get-my-user-feedback
+    security:
+      - authorization: []
+    parameters:
+      - name: assetId
+        in: query
+        description: Filter feedback by asset UUID
+        required: false
+        schema:
+          type: string
+          format: uuid
+
+      - name: actionSubtype
+        in: query
+        description: Filter by action subtype (repeatable)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+
+      - name: rating
+        in: query
+        description: Filter by star rating (repeatable)
+        required: false
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 5
+
+      - name: time
+        in: query
+        description: >
+          Start of the feedback-creation time window. Requires `timerel`;
+          requires `endtime` for `between`/`during`.
+        required: false
+        schema:
+          type: string
+          format: date-time
+
+      - name: endtime
+        in: query
+        description: >
+          End of the feedback-creation time window. Only used with
+          `timerel=between` or `timerel=during`.
+        required: false
+        schema:
+          type: string
+          format: date-time
+
+      - name: timerel
+        in: query
+        description: >
+          Temporal relation to apply against the feedback creation time
+          when `time` is provided.
+        required: false
+        schema:
+          type: string
+          enum:
+            - before
+            - after
+            - between
+            - during
+
+      - $ref: ../components/parameters.yaml#/PageParam
+
+      - $ref: ../components/parameters.yaml#/SizeParam
+
+      - name: sort
+        in: query
+        description: >
+          Sort results by feedback creation time. Format:
+          `ratingCreatedAt:asc` or `ratingCreatedAt:desc`.
+          Defaults to `ratingCreatedAt:desc`.
+        required: false
+        schema:
+          type: string
+        example: ratingCreatedAt:desc
+
+    responses:
+      '200':
+        description: Successfully retrieved feedback submitted by the authenticated user
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/interaction.yaml#/UserFeedbackPaginatedResponse
+
+      '400':
+        description: Bad Request
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/GenericBadRequestResponse
+
+      '500':
+        description: Internal Server Error
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
+
+    x-codeSamples:
+      - lang: cURL
+        label: Get my feedback
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/user?page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
+
+      - lang: cURL
+        label: Get my feedback by asset
+        source: |
+          curl --location 'https://${HOSTNAME}/iudx/v2/user/feedback/user?assetId=811e9876-9381-4a25-8ad1-e8b289616ab8&page=1&size=10' \
+            --header 'Authorization: Bearer <your-token>'
 /iudx/v2/provider/feedback:
   post:
     tags:
@@ -727,65 +1443,47 @@
       content:
         application/json:
           schema:
-            type: object
-            required:
-              - assetId
-              - type
-            properties:
-              assetId:
-                type: string
-                format: uuid
-                description: UUID of the asset
-              type:
-                type: string
-                enum:
-                  - FAQ
-                  - FEEDBACK
-                  - INFO
-                  - DATA_DESCRIPTION
-                  - SUGGESTION
-                description: Type of provider feedback
-              data:
-                type: object
-                description: Structured feedback data. Content varies by feedback type.
+            $ref: ../components/schemas/interaction.yaml#/ProviderFeedbackRequest
           examples:
             faq:
-              summary: FAQ entry
+              summary: FAQ entries
               value:
                 assetId: 9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8
                 type: FAQ
                 data:
-                  question: How frequently is this dataset updated?
-                  answer: The dataset is updated daily.
+                  - question: How frequently is this dataset updated?
+                    answer: The dataset is updated daily.
+                  - question: Is historical data available?
+                    answer: Yes, data is available from 2020 onwards.
             feedback:
               summary: General feedback
               value:
                 assetId: 9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8
                 type: FEEDBACK
                 data:
-                  comment: The API response times have improved significantly.
+                  - comment: The API response times have improved significantly.
             info:
               summary: Informational note
               value:
                 assetId: 9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8
                 type: INFO
                 data:
-                  message: This dataset will be deprecated on 2026-12-31; migrate to v2.
+                  - message: This dataset will be deprecated on 2026-12-31; migrate to v2.
             dataDescription:
               summary: Data description
               value:
                 assetId: 9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8
                 type: DATA_DESCRIPTION
                 data:
-                  field: temperature
-                  description: Ambient temperature in Celsius, sampled every 5 minutes.
+                  - field: temperature
+                    description: Ambient temperature in Celsius, sampled every 5 minutes.
             suggestion:
               summary: Suggestion
               value:
                 assetId: 9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8
                 type: SUGGESTION
                 data:
-                  suggestion: Add a CSV export option for query results.
+                  - suggestion: Add a CSV export option for query results.
             minimal:
               summary: Minimal (no structured data)
               value:
@@ -808,7 +1506,7 @@
             example:
               type: "urn:dx:controlPlane:success"
               title: "Success"
-              detail: "Interaction updated successfully"
+              detail: "Feedback submitted successfully"
       '400':
         description: Bad Request
         content:
@@ -860,13 +1558,25 @@
 
         "type": "FAQ",
 
-        "data": {
+        "data": [
+
+        {
 
         "question": "How frequently is this dataset updated?",
 
         "answer": "The dataset is updated daily."
 
+        },
+
+        {
+
+        "question": "Is historical data available?",
+
+        "answer": "Yes, data is available from 2020 onwards."
+
         }
+
+        ]
 
         }''
 
@@ -885,13 +1595,17 @@
 
         "type": "DATA_DESCRIPTION",
 
-        "data": {
+        "data": [
+
+        {
 
         "field": "temperature",
 
         "description": "Ambient temperature in Celsius, sampled every 5 minutes."
 
         }
+
+        ]
 
         }''
 
@@ -913,34 +1627,144 @@
         }''
 
         '
+  put:
+    tags:
+    - User Interactions
+    summary: Update provider feedback on entity
+    description: 'Update provider feedback for a specific data asset and feedback type, replacing the full list of structured feedback entries. Same effect as POST if the asset+type entry does not already exist. The user must be the asset owner or a provider who has interacted with the asset. Requires an authenticated user token with `provider` or `org_admin` role.
+
+      '
+    operationId: put-provider-feedback
+    security:
+    - authorization: []
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: ../components/schemas/interaction.yaml#/ProviderFeedbackRequest
+          examples:
+            faq:
+              summary: Replace FAQ entries
+              value:
+                assetId: 9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8
+                type: FAQ
+                data:
+                  - question: How frequently is this dataset updated?
+                    answer: The dataset is updated daily, at midnight UTC.
+                  - question: Is historical data available?
+                    answer: Yes, data is available from 2019 onwards.
+    responses:
+      '200':
+        description: Feedback successfully updated
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                title:
+                  type: string
+                detail:
+                  type: string
+            example:
+              type: "urn:dx:controlPlane:success"
+              title: "Success"
+              detail: "Feedback updated successfully"
+      '400':
+        description: Bad Request
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/GenericBadRequestResponse
+            example:
+              type: urn:dx:controlPlane:badRequest
+              title: Bad Request
+              detail: Missing or malformed request
+      '401':
+        description: Unauthorized
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/UnauthorizedResponse
+            example:
+              type: urn:dx:controlPlane:notAuthorized
+              title: Not Authorized
+              detail: Missing or invalid Bearer token
+      '403':
+        description: Forbidden
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/ForbiddenResponse
+            example:
+              type: urn:dx:controlPlane:forbidden
+              title: Forbidden
+              detail: User does not have the required role.
+      '500':
+        description: Internal Server Error
+        content:
+          application/json:
+            schema:
+              $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
+    x-codeSamples:
+    - lang: cURL
+      label: Update provider feedback (FAQ, full list)
+      source: 'curl --location --request PUT ''https://${HOSTNAME}/iudx/v2/provider/feedback'' \
+
+        --header ''Authorization: Bearer <your-token>'' \
+
+        --header ''Content-Type: application/json'' \
+
+        --data ''{
+
+        "assetId": "9179b887-04ef-4ce5-ab3a-b5bbd39ea3c8",
+
+        "type": "FAQ",
+
+        "data": [
+
+        {
+
+        "question": "How frequently is this dataset updated?",
+
+        "answer": "The dataset is updated daily, at midnight UTC."
+
+        },
+
+        {
+
+        "question": "Is historical data available?",
+
+        "answer": "Yes, data is available from 2019 onwards."
+
+        }
+
+        ]
+
+        }''
+
+        '
   get:
     tags:
     - User Interactions
     summary: Get provider feedback
-    description: 'Retrieve paginated provider feedback with optional filters by user, asset, or type. Requires an authenticated user token.
+    description: 'Retrieve a paginated list of feedback provided by providers, grouped by asset with each feedback type listed underneath. assetId and/or type, if provided, can be used to narrow the results.
 
       '
     operationId: get-provider-feedback
-    security:
-    - authorization: []
     parameters:
-    - name: userId
-      in: query
-      description: Filter by user UUID
-      required: false
-      schema:
-        type: string
-        format: uuid
     - name: assetId
       in: query
-      description: Filter by asset UUID
+      description: Narrow to a specific asset UUID within the caller's own feedback
       required: false
       schema:
         type: string
         format: uuid
     - name: type
       in: query
-      description: Filter by action subtype (repeatable)
+      description: Narrow to specific feedback type(s) within the caller's own feedback (repeatable)
       required: false
       style: form
       explode: true
@@ -948,6 +1772,12 @@
         type: array
         items:
           type: string
+          enum:
+          - FAQ
+          - FEEDBACK
+          - INFO
+          - DATA_DESCRIPTION
+          - SUGGESTION
     - $ref: ../components/parameters.yaml#/PageParam
     - $ref: ../components/parameters.yaml#/SizeParam
     responses:
@@ -981,6 +1811,13 @@
               $ref: ../components/schemas/common.yaml#/InternalServerErrorResponse
     x-codeSamples:
     - lang: cURL
+      label: Get my provider feedback (no filters)
+      source: 'curl --location ''https://${HOSTNAME}/iudx/v2/provider/feedback?page=1&size=10'' \
+
+        --header ''Authorization: Bearer <your-token>''
+
+        '
+    - lang: cURL
       label: Get provider feedback (by asset)
       source: 'curl --location ''https://${HOSTNAME}/iudx/v2/provider/feedback?assetId=811e9876-9381-4a25-8ad1-e8b289616ab8&page=1&size=10'' \
 
@@ -990,13 +1827,6 @@
     - lang: cURL
       label: Get provider feedback (by type, repeatable)
       source: 'curl --location ''https://${HOSTNAME}/iudx/v2/provider/feedback?type=FAQ&type=DATA_DESCRIPTION&page=1&size=10'' \
-
-        --header ''Authorization: Bearer <your-token>''
-
-        '
-    - lang: cURL
-      label: Get provider feedback (by user)
-      source: 'curl --location ''https://${HOSTNAME}/iudx/v2/provider/feedback?userId=fd62ba22-d338-4dad-b09c-2bccfa20b04a&page=1&size=10'' \
 
         --header ''Authorization: Bearer <your-token>''
 
