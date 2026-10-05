@@ -48,6 +48,7 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
         FROM user_interactions
         WHERE user_id = $1
           AND asset_id = $2
+        ORDER BY feedback_created_at DESC
         """;
 
     JsonArray selectParams =
@@ -74,7 +75,13 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
                 return restoreDeletedFeedback(userFeedback, json);
               }
 
-              // Existing feedback with a status -> preserve existing behavior.
+              // Rejected feedback can be submitted again.
+              if ("REJECTED".equalsIgnoreCase(feedbackStatus)) {
+                return insertFeedback(userFeedback, json);
+              }
+
+              // Existing feedback with either pending or approved status
+              // behavior.
               return Future.failedFuture(
                   new DxConflictException(
                       "Feedback already exists for this asset. "
@@ -415,6 +422,8 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
     applyFilter.accept("asset_id", filters.get("asset_id"));
     applyFilter.accept("action_subtype", filters.get("action_subtype"));
     applyFilter.accept("entity_rating", filters.get("entity_rating"));
+    applyFilter.accept("feedback_status", filters.get("feedback_status"));
+    applyFilter.accept("feedback_comment", filters.get("feedback_comment"));
 
     // Temporal filters
     // feedback_created_at is a dedicated column (distinct from the shared created_at used by
@@ -547,12 +556,23 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
         postgresService
             .executeQuery(sql, params)
             .map(
-                rows ->
-                    new PagedRows(
-                        rows.getRows().stream()
-                            .map(obj -> UserFeedback.fromJson((JsonObject) obj))
-                            .toList(),
-                        rows.getTotalCount()));
+                rows -> {
+                  JsonArray resultRows = rows.getRows();
+
+                  LOGGER.debug("Returned rows: {}", resultRows.size());
+
+                  long totalCount =
+                      resultRows.isEmpty() ? 0 : resultRows.getJsonObject(0).getLong("total_count");
+
+                  LOGGER.debug("Window total count: {}", totalCount);
+
+                  List<UserFeedback> feedbacks =
+                      resultRows.stream()
+                          .map(obj -> UserFeedback.fromJson((JsonObject) obj))
+                          .toList();
+
+                  return new PagedRows(feedbacks, totalCount);
+                });
 
     // -----------------------------
     // Full-set rating summary (never page-scoped, so no LIMIT/OFFSET here)
@@ -677,12 +697,23 @@ public class UserFeedbackDaoImpl extends AbstractBaseDAO<UserFeedback> implement
         postgresService
             .executeQuery(sql, params)
             .map(
-                rows ->
-                    new PagedRows(
-                        rows.getRows().stream()
-                            .map(obj -> UserFeedback.fromJson((JsonObject) obj))
-                            .toList(),
-                        rows.getTotalCount()));
+                rows -> {
+                  JsonArray resultRows = rows.getRows();
+
+                  LOGGER.debug("Returned rows: {}", resultRows.size());
+
+                  long totalCount =
+                      resultRows.isEmpty() ? 0 : resultRows.getJsonObject(0).getLong("total_count");
+
+                  LOGGER.debug("Window total count: {}", totalCount);
+
+                  List<UserFeedback> feedbacks =
+                      resultRows.stream()
+                          .map(obj -> UserFeedback.fromJson((JsonObject) obj))
+                          .toList();
+
+                  return new PagedRows(feedbacks, totalCount);
+                });
 
     // -----------------------------
     // Full-set rating summary (never page-scoped, so no LIMIT/OFFSET here)
